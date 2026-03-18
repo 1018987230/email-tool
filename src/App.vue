@@ -4,6 +4,10 @@ import type { MailItem, AccountInfo } from './env.d'
 import deepseekService from './services/deepseek'
 
 const STORAGE_KEY = 'ideal-list-email-draft'
+const MAIL_HISTORY_KEY = 'ideal-list-mail-history'
+const AI_RESULTS_KEY = 'ideal-list-ai-results'
+const PROMPT_TEMPLATES_KEY = 'ideal-list-prompt-templates'
+const CURRENT_PROMPT_KEY = 'ideal-list-current-prompt'
 
 interface EmailDraft {
   accountName?: string
@@ -11,6 +15,13 @@ interface EmailDraft {
   password?: string
   imapHost?: string
   imapPort?: number
+}
+
+interface PromptTemplate {
+  id: string
+  name: string
+  content: string
+  createdAt: number
 }
 
 function loadEmailDraft(): EmailDraft | null {
@@ -30,6 +41,140 @@ function saveEmailDraft(draft: EmailDraft) {
   } catch {
     // ignore
   }
+}
+
+// 加载邮件历史
+function loadMailHistory(): MailItem[] {
+  try {
+    const raw = localStorage.getItem(MAIL_HISTORY_KEY)
+    if (!raw) return []
+    const mails = JSON.parse(raw) as MailItem[]
+    return Array.isArray(mails) ? mails : []
+  } catch {
+    return []
+  }
+}
+
+// 保存邮件历史
+function saveMailHistory(mails: MailItem[]) {
+  try {
+    // 只保存最近 100 封邮件，避免 localStorage 溢出
+    const toSave = mails.slice(0, 100)
+    localStorage.setItem(MAIL_HISTORY_KEY, JSON.stringify(toSave))
+  } catch {
+    // ignore
+  }
+}
+
+// 加载 AI 分析结果
+function loadAiResults(): Record<string, { summary: string; score: string; loading: boolean }> {
+  try {
+    const raw = localStorage.getItem(AI_RESULTS_KEY)
+    if (!raw) return {}
+    const results = JSON.parse(raw) as Record<string, { summary: string; score: string; loading: boolean }>
+    return typeof results === 'object' ? results : {}
+  } catch {
+    return {}
+  }
+}
+
+// 保存 AI 分析结果
+function saveAiResults(results: Record<string, { summary: string; score: string; loading: boolean }>) {
+  try {
+    // 过滤掉 loading 状态的结果，不保存
+    const toSave: Record<string, { summary: string; score: string; loading: boolean }> = {}
+    for (const [key, value] of Object.entries(results)) {
+      if (!value.loading) {
+        toSave[key] = value
+      }
+    }
+    localStorage.setItem(AI_RESULTS_KEY, JSON.stringify(toSave))
+  } catch {
+    // ignore
+  }
+}
+
+// 加载提示词模板
+function loadPromptTemplates(): PromptTemplate[] {
+  try {
+    const raw = localStorage.getItem(PROMPT_TEMPLATES_KEY)
+    if (!raw) return getDefaultPromptTemplates()
+    const templates = JSON.parse(raw) as PromptTemplate[]
+    return Array.isArray(templates) && templates.length > 0 ? templates : getDefaultPromptTemplates()
+  } catch {
+    return getDefaultPromptTemplates()
+  }
+}
+
+// 保存提示词模板
+function savePromptTemplates(templates: PromptTemplate[]) {
+  try {
+    localStorage.setItem(PROMPT_TEMPLATES_KEY, JSON.stringify(templates))
+  } catch {
+    // ignore
+  }
+}
+
+// 加载当前提示词
+function loadCurrentPrompt(): string {
+  try {
+    const raw = localStorage.getItem(CURRENT_PROMPT_KEY)
+    return raw || getDefaultPrompt()
+  } catch {
+    return getDefaultPrompt()
+  }
+}
+
+// 保存当前提示词
+function saveCurrentPrompt(prompt: string) {
+  try {
+    localStorage.setItem(CURRENT_PROMPT_KEY, prompt)
+  } catch {
+    // ignore
+  }
+}
+
+// 默认提示词
+function getDefaultPrompt(): string {
+  return `你是一个邮件分析助手。请对以下邮件进行简要分析，并严格按以下格式回复（不要省略标题）：
+【评分】x/10
+（1-10 分，表示重要性/意向强度，10 为最高）
+【总结】一两句话概括邮件要点。
+【建议】简短跟进建议（可选）。`
+}
+
+// 默认提示词模板
+function getDefaultPromptTemplates(): PromptTemplate[] {
+  return [
+    {
+      id: 'default',
+      name: '默认模板',
+      content: getDefaultPrompt(),
+      createdAt: Date.now()
+    },
+    {
+      id: 'sales',
+      name: '销售分析',
+      content: `你是一个销售邮件分析专家。请分析以下邮件，判断客户意向度：
+【评分】x/10
+（10分表示成交意向极高，1分表示无兴趣）
+【客户意向】描述客户的购买意向和关注点
+【下一步行动】给出具体的跟进建议
+【回复要点】建议回复时应包含的关键信息`,
+      createdAt: Date.now()
+    },
+    {
+      id: 'support',
+      name: '客服支持',
+      content: `你是一个客服支持分析助手。请分析以下客户邮件：
+【评分】x/10
+（10分表示紧急重要，1分表示一般咨询）
+【问题类型】技术问题/账单问题/功能咨询/投诉建议/其他
+【客户情绪】愤怒/着急/平静/满意
+【处理建议】具体的处理步骤和回复要点`,
+      createdAt: Date.now()
+    }
+  ]
 }
 
 const accountName = ref('')
@@ -52,6 +197,21 @@ const openAtLogin = ref(false)
 /** 每封邮件的 AI 分析结果：key 为 mailKey，value 为 { summary, score, loading } */
 const aiResultMap = ref<Record<string, { summary: string; score: string; loading: boolean }>>({})
 
+/** 是否显示历史记录 */
+const showHistory = ref(false)
+/** 提示词模板 */
+const promptTemplates = ref<PromptTemplate[]>(loadPromptTemplates())
+/** 当前使用的提示词 */
+const currentPrompt = ref(loadCurrentPrompt())
+/** 是否显示提示词编辑器 */
+const showPromptEditor = ref(false)
+/** 编辑中的提示词名称 */
+const editingPromptName = ref('')
+/** 编辑中的提示词内容 */
+const editingPromptContent = ref('')
+/** 是否编辑已有模板 */
+const editingPromptId = ref<string | null>(null)
+
 const api = window.electronAPI
 if (!api) {
   addStatus.value = 'error'
@@ -62,6 +222,8 @@ function onNewMails(payload: { accountId: string; accountName: string; list: Arr
   const { accountId, accountName: name, list } = payload
   const items: MailItem[] = list.map((m) => ({ ...m, accountId, accountName: name }))
   mails.value = [...items, ...mails.value]
+  // 保存到本地
+  saveMailHistory(mails.value)
   if (autoAnalyzeEnabled.value && items.length) {
     const first = items[0]
     analyzeOneMail({ ...first, accountId, accountName: name })
@@ -95,6 +257,11 @@ watch([accountName, email, password, imapHost, imapPort], () => {
     imapHost: imapHost.value || undefined,
     imapPort: imapPort.value === '' ? undefined : Number(imapPort.value) || undefined,
   })
+}, { deep: true })
+
+// 监听 AI 结果变化并保存
+watch(aiResultMap, (newValue) => {
+  saveAiResults(newValue)
 }, { deep: true })
 
 onUnmounted(() => {
@@ -136,6 +303,7 @@ async function removeAccount(accountId: string) {
   accounts.value = accounts.value.filter((a) => a.accountId !== accountId)
   mails.value = mails.value.filter((m) => m.accountId !== accountId)
   if (selectedMail.value?.accountId === accountId) selectedMail.value = null
+  saveMailHistory(mails.value)
 }
 
 async function disconnectAll() {
@@ -145,6 +313,7 @@ async function disconnectAll() {
   selectedMail.value = null
   monitorStatus.value = 'idle'
   addStatusText.value = ''
+  saveMailHistory([])
 }
 
 async function startMonitor() {
@@ -169,12 +338,6 @@ function mailKey(m: MailItem) {
   return `${m.accountId}-${m.uid}`
 }
 
-const AI_PROMPT = `你是一个邮件分析助手。请对以下邮件进行简要分析，并严格按以下格式回复（不要省略标题）：
-【评分】x/10
-（1-10 分，表示重要性/意向强度，10 为最高）
-【总结】一两句话概括邮件要点。
-【建议】简短跟进建议（可选）。`
-
 async function analyzeOneMail(mail: MailItem) {
   const key = mailKey(mail)
   if (aiResultMap.value[key]?.loading) return
@@ -188,7 +351,7 @@ async function analyzeOneMail(mail: MailItem) {
   }
   const content = `主题：${mail.subject}\n发件人：${mail.from}\n日期：${mail.date}\n\n正文：\n${mail.text ?? '(无正文)'}`
   const messages = [
-    { role: 'user' as const, content: AI_PROMPT },
+    { role: 'user' as const, content: currentPrompt.value },
     { role: 'user' as const, content },
   ]
   try {
@@ -252,6 +415,100 @@ function toggleAutoAnalyze() {
     }
   }
 }
+
+// 加载历史记录
+function loadHistory() {
+  const historyMails = loadMailHistory()
+  const historyResults = loadAiResults()
+  if (historyMails.length > 0) {
+    mails.value = historyMails
+    aiResultMap.value = historyResults
+    showHistory.value = true
+  }
+}
+
+// 清空历史记录
+function clearHistory() {
+  mails.value = []
+  aiResultMap.value = {}
+  saveMailHistory([])
+  saveAiResults({})
+  showHistory.value = false
+}
+
+// 打开提示词编辑器
+function openPromptEditor(template?: PromptTemplate) {
+  if (template) {
+    editingPromptId.value = template.id
+    editingPromptName.value = template.name
+    editingPromptContent.value = template.content
+  } else {
+    editingPromptId.value = null
+    editingPromptName.value = ''
+    editingPromptContent.value = currentPrompt.value
+  }
+  showPromptEditor.value = true
+}
+
+// 保存提示词模板
+function savePromptTemplate() {
+  if (!editingPromptName.value.trim()) {
+    alert('请输入提示词名称')
+    return
+  }
+  if (!editingPromptContent.value.trim()) {
+    alert('请输入提示词内容')
+    return
+  }
+
+  if (editingPromptId.value) {
+    // 更新现有模板
+    const index = promptTemplates.value.findIndex(p => p.id === editingPromptId.value)
+    if (index >= 0) {
+      promptTemplates.value[index] = {
+        ...promptTemplates.value[index],
+        name: editingPromptName.value.trim(),
+        content: editingPromptContent.value.trim(),
+      }
+    }
+  } else {
+    // 创建新模板
+    const newTemplate: PromptTemplate = {
+      id: 'prompt_' + Date.now(),
+      name: editingPromptName.value.trim(),
+      content: editingPromptContent.value.trim(),
+      createdAt: Date.now(),
+    }
+    promptTemplates.value.push(newTemplate)
+  }
+
+  savePromptTemplates(promptTemplates.value)
+  showPromptEditor.value = false
+  editingPromptId.value = null
+  editingPromptName.value = ''
+  editingPromptContent.value = ''
+}
+
+// 选择提示词模板
+function selectPromptTemplate(template: PromptTemplate) {
+  currentPrompt.value = template.content
+  saveCurrentPrompt(template.content)
+}
+
+// 删除提示词模板
+function deletePromptTemplate(id: string) {
+  if (confirm('确定要删除这个提示词模板吗？')) {
+    promptTemplates.value = promptTemplates.value.filter(p => p.id !== id)
+    savePromptTemplates(promptTemplates.value)
+  }
+}
+
+// 应用当前编辑的提示词
+function applyCurrentPrompt() {
+  currentPrompt.value = editingPromptContent.value
+  saveCurrentPrompt(editingPromptContent.value)
+  showPromptEditor.value = false
+}
 </script>
 
 <template>
@@ -259,11 +516,76 @@ function toggleAutoAnalyze() {
     <header class="header">
       <h1>邮箱实时监控</h1>
       <p class="hint">添加多个邮箱并设置自定义名称，统一监控新邮件</p>
-      <label v-if="api" class="open-at-login">
-        <input type="checkbox" v-model="openAtLogin" @change="onOpenAtLoginChange" />
-        <span>开机自启动</span>
-      </label>
+      <div class="header-actions">
+        <label v-if="api" class="open-at-login">
+          <input type="checkbox" v-model="openAtLogin" @change="onOpenAtLoginChange" />
+          <span>开机自启动</span>
+        </label>
+        <button class="btn small" @click="showHistory = !showHistory">
+          {{ showHistory ? '隐藏历史' : '历史记录' }}
+        </button>
+        <button class="btn small" @click="openPromptEditor()">
+          提示词设置
+        </button>
+      </div>
     </header>
+
+    <!-- 历史记录面板 -->
+    <section v-if="showHistory" class="history-panel">
+      <h2 class="sec-title">历史记录</h2>
+      <p class="hint">已缓存 {{ mails.length }} 封邮件及 AI 分析结果</p>
+      <div class="actions">
+        <button class="btn" @click="loadHistory">加载历史记录</button>
+        <button class="btn" @click="clearHistory">清空历史</button>
+        <button class="btn" @click="showHistory = false">关闭</button>
+      </div>
+    </section>
+
+    <!-- 提示词编辑器 -->
+    <section v-if="showPromptEditor" class="prompt-editor">
+      <h2 class="sec-title">提示词设置</h2>
+      
+      <div class="prompt-templates">
+        <h3>选择模板</h3>
+        <div class="template-list">
+          <div 
+            v-for="template in promptTemplates" 
+            :key="template.id"
+            class="template-item"
+            :class="{ active: currentPrompt === template.content }"
+            @click="selectPromptTemplate(template)"
+          >
+            <span class="template-name">{{ template.name }}</span>
+            <div class="template-actions">
+              <button class="btn tiny" @click.stop="openPromptEditor(template)">编辑</button>
+              <button v-if="!['default', 'sales', 'support'].includes(template.id)" class="btn tiny danger" @click.stop="deletePromptTemplate(template.id)">删除</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="prompt-edit-form">
+        <h3>{{ editingPromptId ? '编辑提示词' : '新建提示词' }}</h3>
+        <div class="row">
+          <label>提示词名称</label>
+          <input v-model="editingPromptName" type="text" placeholder="例如：销售分析模板" />
+        </div>
+        <div class="row">
+          <label>提示词内容</label>
+          <textarea v-model="editingPromptContent" rows="8" placeholder="请输入 AI 分析提示词..." />
+        </div>
+        <div class="actions">
+          <button class="btn primary" @click="savePromptTemplate">保存模板</button>
+          <button class="btn" @click="applyCurrentPrompt">直接应用</button>
+          <button class="btn" @click="showPromptEditor = false">取消</button>
+        </div>
+      </div>
+
+      <div class="current-prompt-preview">
+        <h3>当前使用的提示词</h3>
+        <pre class="prompt-preview">{{ currentPrompt }}</pre>
+      </div>
+    </section>
 
     <section class="add-form" v-if="monitorStatus !== 'monitoring'">
       <h2 class="sec-title">添加邮箱</h2>
@@ -327,7 +649,7 @@ function toggleAutoAnalyze() {
 
     <section class="mail-area" v-if="monitorStatus === 'monitoring' || mails.length">
       <div class="mail-list">
-        <h2>收件列表</h2>
+        <h2>收件列表（{{ mails.length }} 封）</h2>
         <ul>
           <li
             v-for="m in mails"
@@ -384,11 +706,17 @@ function toggleAutoAnalyze() {
   font-size: 0.9rem;
   margin: 0;
 }
+.header-actions {
+  display: flex;
+  gap: 12px;
+  margin-top: 12px;
+  flex-wrap: wrap;
+  align-items: center;
+}
 .open-at-login {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  margin-top: 8px;
   font-size: 0.9rem;
   color: #475569;
   cursor: pointer;
@@ -397,6 +725,106 @@ function toggleAutoAnalyze() {
   width: auto;
   max-width: none;
 }
+
+/* 历史记录面板 */
+.history-panel {
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  padding: 16px;
+  margin-bottom: 20px;
+}
+
+/* 提示词编辑器 */
+.prompt-editor {
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  padding: 16px;
+  margin-bottom: 20px;
+}
+.prompt-editor h3 {
+  font-size: 0.95rem;
+  margin: 16px 0 12px 0;
+  color: #1e293b;
+}
+.prompt-editor h3:first-child {
+  margin-top: 0;
+}
+.template-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+.template-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 12px;
+  background: #fff;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.template-item:hover {
+  border-color: #3b82f6;
+}
+.template-item.active {
+  border-color: #3b82f6;
+  background: #eff6ff;
+}
+.template-name {
+  font-weight: 500;
+  color: #1e293b;
+}
+.template-actions {
+  display: flex;
+  gap: 6px;
+}
+.prompt-edit-form {
+  background: #fff;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  padding: 16px;
+  margin-bottom: 16px;
+}
+.prompt-edit-form textarea {
+  width: 100%;
+  min-height: 120px;
+  padding: 10px 12px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  font-size: 0.9rem;
+  font-family: monospace;
+  resize: vertical;
+}
+.prompt-edit-form textarea:focus {
+  outline: none;
+  border-color: #3b82f6;
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.15);
+}
+.current-prompt-preview {
+  background: #fff;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  padding: 16px;
+}
+.prompt-preview {
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 0.85rem;
+  line-height: 1.5;
+  margin: 0;
+  color: #334155;
+  background: #f1f5f9;
+  padding: 12px;
+  border-radius: 6px;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
 .sec-title {
   font-size: 1rem;
   margin: 0 0 12px 0;
@@ -451,6 +879,17 @@ function toggleAutoAnalyze() {
 .btn.small {
   padding: 6px 12px;
   font-size: 0.85rem;
+}
+.btn.tiny {
+  padding: 4px 8px;
+  font-size: 0.75rem;
+}
+.btn.danger {
+  color: #dc2626;
+  border-color: #dc2626;
+}
+.btn.danger:hover {
+  background: #fef2f2;
 }
 .err-msg,
 .status-msg {
