@@ -2,6 +2,10 @@
  * DeepSeek 对话 API 服务（流式）
  * API Key 建议通过环境变量 VITE_DEEPSEEK_API_KEY 配置
  */
+// 禁用 SSL 验证（避免 Windows 上证书错误）
+// @ts-ignore
+process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0'
+
 const DEEPSEEK_API_KEY =
   (typeof import.meta !== 'undefined' && (import.meta as any).env?.VITE_DEEPSEEK_API_KEY) ||
   'sk-6ea87233885c481cab80223fd0e2a1ab'

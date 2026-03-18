@@ -121,6 +121,10 @@ ipcMain.handle('email:connect', async (_, { email, password, imapHost, imapPort,
     secure: true,
     auth: { user: email, pass: password },
     logger: false,
+    tls: {
+      // 允许自签名证书（解决 Windows 上证书验证失败）
+      rejectUnauthorized: false,
+    },
   })
   try {
     await client.connect()
