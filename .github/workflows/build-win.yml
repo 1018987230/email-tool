@@ -18,11 +18,25 @@ jobs:
           node-version: '20'
           cache: 'npm'
 
-      - name: Install
+      - name: Install dependencies
         run: npm ci
+        env:
+          NODE_TLS_REJECT_UNAUTHORIZED: '0'
+          npm_config_strict_ssl: 'false'
+
+      - name: Type check
+        run: npx vue-tsc --noEmit
+
+      - name: Build frontend
+        run: npx vite build
+
+      - name: Copy preload
+        run: npm run copy-preload
 
       - name: Build Windows exe
-        run: npm run build:win
+        run: npx electron-builder --win
+        env:
+          NODE_TLS_REJECT_UNAUTHORIZED: '0'
 
       - name: Upload exe
         uses: actions/upload-artifact@v4
