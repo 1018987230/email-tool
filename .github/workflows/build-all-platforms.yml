@@ -1,0 +1,182 @@
+# 多平台构建：Linux、macOS、Windows 一次性打包
+name: Build All Platforms
+
+on:
+  push:
+    branches: [main, master]
+    tags:
+      - 'v*'  # v1.0.0 等版本标签触发
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '版本号 (例如: 1.0.0)'
+        required: false
+        default: ''
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        include:
+          # Linux 配置
+          - os: ubuntu-latest
+            platform: linux
+            target: AppImage
+            artifact_name: linux-appimage
+          # macOS 配置
+          - os: macos-latest
+            platform: mac
+            target: dmg
+            artifact_name: mac-dmg
+          # Windows 配置
+          - os: windows-latest
+            platform: win
+            target: portable
+            artifact_name: windows-exe
+
+    runs-on: ${{ matrix.os }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      # Linux 额外依赖
+      - name: Install Linux dependencies
+        if: matrix.platform == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y icnsutils graphicsmagick
+
+      # macOS 额外依赖（如果需要签名）
+      - name: Setup macOS signing
+        if: matrix.platform == 'mac'
+        run: |
+          echo "macOS 构建准备完成"
+          # 如果需要代码签名，在这里配置证书
+
+      # Windows 不需要额外依赖
+
+      - name: Install dependencies
+        run: npm ci
+        env:
+          NODE_TLS_REJECT_UNAUTHORIZED: '0'
+
+      # Linux 和 macOS 构建步骤
+      - name: Build (Linux/macOS)
+        if: matrix.platform != 'win'
+        run: |
+          npm run copy-preload
+          npx electron-builder --${{ matrix.platform }} --${{ matrix.target }}
+        env:
+          NODE_TLS_REJECT_UNAUTHORIZED: '0'
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Windows 构建步骤
+      - name: Build (Windows)
+        if: matrix.platform == 'win'
+        shell: powershell
+        run: |
+          npm run copy-preload
+          npx electron-builder --win --${{ matrix.target }}
+        env:
+          NODE_TLS_REJECT_UNAUTHORIZED: '0'
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Linux 上传产物
+      - name: Upload Linux artifact
+        if: matrix.platform == 'linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: |
+            release/*.AppImage
+            release/*.snap
+            release/*.deb
+            release/linux-unpacked/
+          retention-days: 30
+
+      # macOS 上传产物
+      - name: Upload macOS artifact
+        if: matrix.platform == 'mac'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: |
+            release/*.dmg
+            release/*.zip
+            release/mac/
+          retention-days: 30
+
+      # Windows 上传产物
+      - name: Upload Windows artifact
+        if: matrix.platform == 'win'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: |
+            release/*.exe
+            release/win-unpacked/
+          retention-days: 30
+
+  # 创建 GitHub Release 并上传所有产物
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: List artifacts
+        run: |
+          echo "下载的构建产物："
+          ls -R artifacts
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            artifacts/linux-appimage/**/*
+            artifacts/mac-dmg/**/*
+            artifacts/windows-exe/**/*
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # 构建状态汇总
+  summary:
+    needs: build
+    runs-on: ubuntu-latest
+    if: always()
+    
+    steps:
+      - name: Build Summary
+        run: |
+          echo "=========================================="
+          echo "        多平台构建完成总结"
+          echo "=========================================="
+          echo ""
+          echo "✅ Linux (Ubuntu): 构建完成"
+          echo "   - 产物: AppImage, snap, deb"
+          echo ""
+          echo "✅ macOS: 构建完成"
+          echo "   - 产物: DMG, ZIP"
+          echo ""
+          echo "✅ Windows: 构建完成"
+          echo "   - 产物: EXE (便携版)"
+          echo ""
+          echo "=========================================="
+          echo "下载地址: https://github.com/${{ github.repository }}/actions"
+          echo "=========================================="

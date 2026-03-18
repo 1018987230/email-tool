@@ -36,6 +36,11 @@
         "directories": {
             "output": "release"
         },
+        "files": [
+            "dist/**/*",
+            "dist-electron/**/*",
+            "email.ico"
+        ],
         "win": {
             "target": [
                 {
@@ -47,6 +52,55 @@
             ],
             "signAndEditExecutable": false,
             "icon": "email.ico"
+        },
+        "mac": {
+            "target": [
+                {
+                    "target": "dmg",
+                    "arch": [
+                        "x64",
+                        "arm64"
+                    ]
+                },
+                {
+                    "target": "zip",
+                    "arch": [
+                        "x64",
+                        "arm64"
+                    ]
+                }
+            ],
+            "icon": "email.ico",
+            "category": "public.app-category.productivity",
+            "identity": null
+        },
+        "linux": {
+            "target": [
+                {
+                    "target": "AppImage",
+                    "arch": [
+                        "x64"
+                    ]
+                },
+                {
+                    "target": "snap",
+                    "arch": [
+                        "x64"
+                    ]
+                },
+                {
+                    "target": "deb",
+                    "arch": [
+                        "x64"
+                    ]
+                }
+            ],
+            "icon": "email.ico",
+            "category": "Office",
+            "maintainer": "Email Tool Team",
+            "vendor": "Email Tool",
+            "synopsis": "智能邮件监控与AI分析工具",
+            "description": "统一监控多个邮箱，AI智能分析邮件内容，自动评分提醒"
         },
         "nsis": {
             "oneClick": false,
