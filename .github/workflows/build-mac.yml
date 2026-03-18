@@ -33,7 +33,7 @@ jobs:
         run: npm run copy-preload
 
       - name: Build macOS app
-        run: npx electron-builder --mac --dmg --zip
+        run: npx electron-builder --mac
         env:
           NODE_TLS_REJECT_UNAUTHORIZED: '0'
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
