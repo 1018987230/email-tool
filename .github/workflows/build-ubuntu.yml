@@ -1,0 +1,54 @@
+# Ubuntu (Linux) 构建工作流
+name: Build Ubuntu
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y icnsutils graphicsmagick
+
+      - name: Install dependencies
+        run: npm ci
+        env:
+          NODE_TLS_REJECT_UNAUTHORIZED: '0'
+
+      - name: Type check
+        run: npx vue-tsc --noEmit
+
+      - name: Build frontend
+        run: npx vite build
+
+      - name: Copy preload
+        run: npm run copy-preload
+
+      - name: Build Linux app
+        run: npx electron-builder --linux --AppImage
+        env:
+          NODE_TLS_REJECT_UNAUTHORIZED: '0'
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload Linux artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-appimage
+          path: |
+            release/*.AppImage
+            release/*.snap
+            release/linux-unpacked/
+          retention-days: 30

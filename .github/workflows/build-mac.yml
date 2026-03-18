@@ -1,0 +1,48 @@
+# macOS 构建工作流
+name: Build macOS
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+        env:
+          NODE_TLS_REJECT_UNAUTHORIZED: '0'
+
+      - name: Type check
+        run: npx vue-tsc --noEmit
+
+      - name: Build frontend
+        run: npx vite build
+
+      - name: Copy preload
+        run: npm run copy-preload
+
+      - name: Build macOS app
+        run: npx electron-builder --mac --dmg --zip
+        env:
+          NODE_TLS_REJECT_UNAUTHORIZED: '0'
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload macOS artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-dmg
+          path: |
+            release/*.dmg
+            release/*.zip
+          retention-days: 30
