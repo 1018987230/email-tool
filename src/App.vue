@@ -509,6 +509,16 @@ function applyCurrentPrompt() {
   saveCurrentPrompt(editingPromptContent.value)
   showPromptEditor.value = false
 }
+
+// 打开官网
+function openWebsite() {
+  const websiteUrl = 'https://emailTool.ycplanet.com/'
+  if (api?.openExternal) {
+    api.openExternal(websiteUrl)
+  } else {
+    window.open(websiteUrl, '_blank')
+  }
+}
 </script>
 
 <template>
@@ -521,6 +531,9 @@ function applyCurrentPrompt() {
           <input type="checkbox" v-model="openAtLogin" @change="onOpenAtLoginChange" />
           <span>开机自启动</span>
         </label>
+        <button class="btn small" @click="openWebsite">
+          🌐 官网
+        </button>
         <button class="btn small" @click="showHistory = !showHistory">
           {{ showHistory ? '隐藏历史' : '历史记录' }}
         </button>

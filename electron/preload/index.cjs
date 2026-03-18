@@ -13,4 +13,5 @@ contextBridge.exposeInMainWorld('electronAPI', {
   showNotification: (opts) => ipcRenderer.invoke('app:showNotification', opts),
   getOpenAtLogin: () => ipcRenderer.invoke('app:getOpenAtLogin'),
   setOpenAtLogin: (open) => ipcRenderer.invoke('app:setOpenAtLogin', open),
+  openExternal: (url) => ipcRenderer.invoke('app:openExternal', url),
 })

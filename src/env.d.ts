@@ -26,6 +26,7 @@ interface ElectronAPI {
   showNotification: (opts: { title: string; body: string }) => Promise<void>
   getOpenAtLogin: () => Promise<boolean>
   setOpenAtLogin: (open: boolean) => Promise<void>
+  openExternal: (url: string) => Promise<void>
 }
 
 declare global {

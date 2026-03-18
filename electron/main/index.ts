@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, Tray, nativeImage, Menu, Notification } from 'electron'
+import { app, BrowserWindow, ipcMain, Tray, nativeImage, Menu, Notification, shell } from 'electron'
 import { join, dirname } from 'path'
 import { fileURLToPath } from 'url'
 import { mkdirSync, writeFileSync, unlinkSync, existsSync } from 'fs'
@@ -366,6 +366,11 @@ X-GNOME-Autostart-enabled=true
 
 ipcMain.handle('app:getOpenAtLogin', () => getOpenAtLogin())
 ipcMain.handle('app:setOpenAtLogin', (_, open: boolean) => setOpenAtLogin(open))
+
+// 打开外部链接
+ipcMain.handle('app:openExternal', (_, url: string) => {
+  shell.openExternal(url)
+})
 
 app.whenReady().then(createWindow)
 app.on('window-all-closed', () => {
