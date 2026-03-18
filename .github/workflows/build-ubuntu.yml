@@ -49,6 +49,4 @@ jobs:
           name: linux-appimage
           path: |
             release/*.AppImage
-            release/*.snap
-            release/linux-unpacked/
           retention-days: 30

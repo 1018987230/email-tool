@@ -70,7 +70,6 @@
                     ]
                 }
             ],
-            "icon": "email.ico",
             "category": "public.app-category.productivity",
             "identity": null
         },
@@ -81,21 +80,8 @@
                     "arch": [
                         "x64"
                     ]
-                },
-                {
-                    "target": "snap",
-                    "arch": [
-                        "x64"
-                    ]
-                },
-                {
-                    "target": "deb",
-                    "arch": [
-                        "x64"
-                    ]
                 }
             ],
-            "icon": "email.ico",
             "category": "Office",
             "maintainer": "Email Tool Team",
             "vendor": "Email Tool",
