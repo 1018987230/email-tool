@@ -45,7 +45,8 @@
                     ]
                 }
             ],
-            "signAndEditExecutable": false
+            "signAndEditExecutable": false,
+            "icon": "email.ico"
         },
         "nsis": {
             "oneClick": false,

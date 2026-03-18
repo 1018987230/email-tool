@@ -54,9 +54,11 @@ function createTray() {
 }
 
 function createWindow() {
+  const iconPath = join(__dirname, '../../email.ico')
   mainWindow = new BrowserWindow({
     width: 900,
     height: 700,
+    icon: iconPath,
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       contextIsolation: true,
