@@ -10,11 +10,14 @@ import { simpleParser } from 'mailparser'
 let mainWindow: BrowserWindow | null = null
 let tray: Tray | null = null
 let isQuitting = false
+let hasUnreadMails = false
+let flashTimer: ReturnType<typeof setInterval> | null = null
 const POLL_MS = 8000
 
-// 16x16 托盘图标（简单信封形状灰块）
-const TRAY_ICON_DATA =
-  'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAOklEQVQ4T2NkYGD4z0ABYBzVMKoBBg0GBgZGBgaG/4wMDP8p1gDSAKQBqAGkAagGkAagGkAagGoY1QAAXpcL/Hh2bAAAAABJRU5ErkJggg=='
+// 托盘图标路径
+function getTrayIconPath() {
+  return join(__dirname, '../../email.ico')
+}
 
 interface AccountState {
   client: ImapFlow
@@ -41,16 +44,97 @@ function getImapConfig(email: string): { host: string; port: number } {
 }
 
 function createTray() {
-  const icon = nativeImage.createFromDataURL(TRAY_ICON_DATA)
-  tray = new Tray(icon.resize({ width: 16, height: 16 }))
+  const iconPath = getTrayIconPath()
+  let icon: Electron.NativeImage
+  
+  try {
+    icon = nativeImage.createFromPath(iconPath)
+    // Windows 托盘图标建议 16x16，macOS 18x18，Linux 22x22
+    if (process.platform === 'win32') {
+      icon = icon.resize({ width: 16, height: 16 })
+    }
+  } catch {
+    // 如果加载失败，使用一个空白图标
+    icon = nativeImage.createEmpty()
+  }
+  
+  tray = new Tray(icon)
   tray.setToolTip('邮箱监控')
+  updateTrayMenu()
+  tray.on('double-click', () => {
+    mainWindow?.show()
+    clearUnreadIndicator()
+  })
+}
+
+// 更新托盘菜单
+function updateTrayMenu() {
+  if (!tray) return
   const menu = Menu.buildFromTemplate([
-    { label: '显示主窗口', click: () => mainWindow?.show() },
+    { 
+      label: hasUnreadMails ? '有新邮件！（点击查看）' : '暂无新邮件',
+      enabled: hasUnreadMails,
+      click: () => {
+        mainWindow?.show()
+        clearUnreadIndicator()
+      }
+    },
+    { type: 'separator' },
+    { label: '显示主窗口', click: () => {
+      mainWindow?.show()
+      clearUnreadIndicator()
+    }},
     { type: 'separator' },
     { label: '退出', click: () => { isQuitting = true; app.quit() } },
   ])
   tray.setContextMenu(menu)
-  tray.on('double-click', () => mainWindow?.show())
+  tray.setToolTip(hasUnreadMails ? '【有新邮件】邮箱监控' : '邮箱监控')
+}
+
+// 设置未读状态（托盘闪烁）
+function setUnreadIndicator() {
+  if (hasUnreadMails) return // 已经在闪烁
+  hasUnreadMails = true
+  updateTrayMenu()
+  
+  // Windows 上托盘闪烁效果
+  if (process.platform === 'win32' && tray) {
+    let isHighlight = false
+    flashTimer = setInterval(() => {
+      if (!tray) {
+        clearInterval(flashTimer!)
+        return
+      }
+      // 通过 tooltip 变化引起用户注意
+      isHighlight = !isHighlight
+      tray.setToolTip(isHighlight ? '🔔 【新邮件】邮箱监控 - 点击查看' : '【有新邮件】邮箱监控')
+    }, 800)
+  }
+  
+  // 显示系统通知
+  if (Notification.isSupported()) {
+    const n = new Notification({
+      title: '收到新邮件',
+      body: '您有新邮件到达，点击托盘图标查看详情',
+      icon: getTrayIconPath()
+    })
+    n.on('click', () => {
+      mainWindow?.show()
+      clearUnreadIndicator()
+    })
+    n.show()
+  }
+}
+
+// 清除未读状态
+function clearUnreadIndicator() {
+  if (!hasUnreadMails) return
+  hasUnreadMails = false
+  if (flashTimer) {
+    clearInterval(flashTimer)
+    flashTimer = null
+  }
+  updateTrayMenu()
 }
 
 function createWindow() {
@@ -81,6 +165,12 @@ function createWindow() {
       mainWindow?.hide()
     }
   })
+  
+  // 窗口显示时清除未读状态
+  mainWindow.on('show', () => {
+    clearUnreadIndicator()
+  })
+  
   createTray()
 }
 
@@ -192,6 +282,10 @@ ipcMain.handle('email:startMonitor', async () => {
           state.lastUid = currentLastUid
           if (list.length) {
             mainWindow.webContents.send('email:newMails', { accountId, accountName: state.name, list })
+            // 如果窗口被隐藏（最小化到托盘），显示托盘提示
+            if (mainWindow && !mainWindow.isVisible()) {
+              setUnreadIndicator()
+            }
           }
         } finally {
           lock.release()
