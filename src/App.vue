@@ -8,6 +8,7 @@ const MAIL_HISTORY_KEY = 'ideal-list-mail-history'
 const AI_RESULTS_KEY = 'ideal-list-ai-results'
 const PROMPT_TEMPLATES_KEY = 'ideal-list-prompt-templates'
 const CURRENT_PROMPT_KEY = 'ideal-list-current-prompt'
+const ACCOUNTS_STORAGE_KEY = 'ideal-list-accounts'
 
 interface EmailDraft {
   accountName?: string
@@ -15,6 +16,15 @@ interface EmailDraft {
   password?: string
   imapHost?: string
   imapPort?: number
+}
+
+// 用于持久化的账户信息（不含密码，密码从 draft 中读取）
+interface SavedAccount {
+  accountId: string
+  name: string
+  email: string
+  host?: string
+  port?: number
 }
 
 interface PromptTemplate {
@@ -40,6 +50,32 @@ function saveEmailDraft(draft: EmailDraft) {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(draft))
   } catch {
     // ignore
+  }
+}
+
+// 保存账户列表到本地存储
+function saveAccountsToStorage(accountList: AccountInfo[]) {
+  try {
+    const toSave: SavedAccount[] = accountList.map(acc => ({
+      accountId: acc.accountId,
+      name: acc.name,
+      email: acc.email,
+    }))
+    localStorage.setItem(ACCOUNTS_STORAGE_KEY, JSON.stringify(toSave))
+  } catch {
+    // ignore
+  }
+}
+
+// 从本地存储加载账户列表
+function loadAccountsFromStorage(): SavedAccount[] {
+  try {
+    const raw = localStorage.getItem(ACCOUNTS_STORAGE_KEY)
+    if (!raw) return []
+    const list = JSON.parse(raw) as SavedAccount[]
+    return Array.isArray(list) ? list : []
+  } catch {
+    return []
   }
 }
 
@@ -232,9 +268,45 @@ function onNewMails(payload: { accountId: string; accountName: string; list: Arr
 
 onMounted(async () => {
   api?.onNewMails(onNewMails)
-  const list = await api?.listAccounts?.() ?? []
-  accounts.value = list
+
+  // 先从本地存储加载账户信息
+  const savedAccounts = loadAccountsFromStorage()
   const draft = loadEmailDraft()
+
+  // 尝试自动重新连接之前保存的账户
+  if (savedAccounts.length > 0 && draft?.password && api) {
+    addStatusText.value = '正在恢复之前的邮箱连接...'
+    for (const saved of savedAccounts) {
+      try {
+        // 使用保存的信息重新连接
+        const portNum = draft.imapPort
+        const port = (typeof portNum === 'number' && !isNaN(portNum) && portNum > 0) ? portNum : undefined
+        const res = await api.connect(
+          saved.email,
+          draft.password,
+          draft.imapHost || undefined,
+          port,
+          saved.name
+        )
+        if (res.ok && res.accountId) {
+          accounts.value.push({
+            accountId: res.accountId,
+            name: res.accountName ?? saved.name,
+            email: saved.email
+          })
+        }
+      } catch (e) {
+        console.error('重新连接账户失败:', saved.email, e)
+      }
+    }
+    if (accounts.value.length > 0) {
+      addStatusText.value = `已恢复 ${accounts.value.length} 个邮箱连接`
+    } else {
+      addStatusText.value = '之前的邮箱连接已失效，请重新添加'
+    }
+  }
+
+  // 加载表单草稿
   if (draft) {
     if (draft.accountName != null) accountName.value = draft.accountName
     if (draft.email != null) email.value = draft.email
@@ -242,6 +314,7 @@ onMounted(async () => {
     if (draft.imapHost != null) imapHost.value = draft.imapHost
     if (draft.imapPort != null) imapPort.value = draft.imapPort === 0 ? '' : draft.imapPort
   }
+
   if (api?.getOpenAtLogin) {
     try {
       openAtLogin.value = await api.getOpenAtLogin()
@@ -283,15 +356,18 @@ async function addAccount() {
   )
   if (res.ok && res.accountId) {
     addStatus.value = 'idle'
-    addStatusText.value = ''
+    addStatusText.value = '邮箱添加成功！'
     accounts.value.push({ accountId: res.accountId, name: res.accountName ?? res.accountId, email: email.value.trim() })
-    saveEmailDraft({
-      accountName: accountName.value.trim() || undefined,
-      email: email.value.trim() || undefined,
-      password: password.value || undefined,
-      imapHost: imapHost.value.trim() || undefined,
-      imapPort: portNum != null && !isNaN(portNum) ? portNum : undefined,
-    })
+    // 保存账户列表到本地存储
+    saveAccountsToStorage(accounts.value)
+    // 清除表单
+    accountName.value = ''
+    email.value = ''
+    password.value = ''
+    imapHost.value = ''
+    imapPort.value = 993
+    // 清除保存的草稿
+    saveEmailDraft({})
   } else {
     addStatus.value = 'error'
     addStatusText.value = res.error ?? '连接失败'
@@ -304,6 +380,8 @@ async function removeAccount(accountId: string) {
   mails.value = mails.value.filter((m) => m.accountId !== accountId)
   if (selectedMail.value?.accountId === accountId) selectedMail.value = null
   saveMailHistory(mails.value)
+  // 保存账户列表到本地存储
+  saveAccountsToStorage(accounts.value)
 }
 
 async function disconnectAll() {
@@ -314,6 +392,12 @@ async function disconnectAll() {
   monitorStatus.value = 'idle'
   addStatusText.value = ''
   saveMailHistory([])
+  // 清除本地存储的账户列表
+  try {
+    localStorage.removeItem(ACCOUNTS_STORAGE_KEY)
+  } catch {
+    // ignore
+  }
 }
 
 async function startMonitor() {
@@ -523,146 +607,251 @@ function openWebsite() {
 
 <template>
   <div class="app">
+    <!-- 科技背景效果 -->
+    <div class="tech-bg">
+      <div class="grid-overlay"></div>
+      <div class="glow-orb orb-1"></div>
+      <div class="glow-orb orb-2"></div>
+    </div>
+
     <header class="header">
-      <h1>邮箱实时监控</h1>
-      <p class="hint">添加多个邮箱并设置自定义名称，统一监控新邮件</p>
+      <div class="header-title">
+        <div class="logo-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/>
+          </svg>
+        </div>
+        <div class="title-text">
+          <h1>邮箱实时监控</h1>
+          <p class="hint">AI 驱动的智能邮件分析系统</p>
+        </div>
+        <div class="status-indicator" :class="{ active: monitorStatus === 'monitoring' }">
+          <span class="status-dot"></span>
+          <span class="status-text">{{ monitorStatus === 'monitoring' ? '监控中' : '待机' }}</span>
+        </div>
+      </div>
       <div class="header-actions">
-        <label v-if="api" class="open-at-login">
+        <label v-if="api" class="tech-toggle">
           <input type="checkbox" v-model="openAtLogin" @change="onOpenAtLoginChange" />
-          <span>开机自启动</span>
+          <span class="toggle-slider"></span>
+          <span class="toggle-label">开机自启</span>
         </label>
         <button class="btn small" @click="openWebsite">
-          🌐 官网
+          <span class="btn-icon">🌐</span> 官网
         </button>
-        <button class="btn small" @click="showHistory = !showHistory">
-          {{ showHistory ? '隐藏历史' : '历史记录' }}
+        <button class="btn small" :class="{ 'ai-active': showHistory }" @click="showHistory = !showHistory">
+          <span class="btn-icon">📋</span> {{ showHistory ? '隐藏历史' : '历史记录' }}
         </button>
-        <button class="btn small" @click="openPromptEditor()">
-          提示词设置
+        <button class="btn primary" @click="openPromptEditor()">
+          <span class="btn-icon">⚙️</span> 提示词设置
         </button>
       </div>
     </header>
 
     <!-- 历史记录面板 -->
-    <section v-if="showHistory" class="history-panel">
-      <h2 class="sec-title">历史记录</h2>
-      <p class="hint">已缓存 {{ mails.length }} 封邮件及 AI 分析结果</p>
+    <section v-if="showHistory" class="history-panel tech-card">
+      <div class="card-header">
+        <div class="card-title">
+          <span class="title-icon">📋</span>
+          <h2>历史记录</h2>
+        </div>
+        <span class="count-badge">{{ mails.length }} 封邮件</span>
+      </div>
+      <p class="hint">已缓存邮件及 AI 分析结果</p>
       <div class="actions">
-        <button class="btn" @click="loadHistory">加载历史记录</button>
-        <button class="btn" @click="clearHistory">清空历史</button>
-        <button class="btn" @click="showHistory = false">关闭</button>
+        <button class="btn" @click="loadHistory">
+          <span class="btn-icon">📂</span> 加载历史
+        </button>
+        <button class="btn danger" @click="clearHistory">
+          <span class="btn-icon">🗑️</span> 清空历史
+        </button>
+        <button class="btn" @click="showHistory = false">
+          <span class="btn-icon">✕</span> 关闭
+        </button>
       </div>
     </section>
 
     <!-- 提示词编辑器 -->
-    <section v-if="showPromptEditor" class="prompt-editor">
-      <h2 class="sec-title">提示词设置</h2>
-      
+    <section v-if="showPromptEditor" class="prompt-editor tech-card">
+      <div class="card-header">
+        <div class="card-title">
+          <span class="title-icon">⚙️</span>
+          <h2>AI 提示词配置</h2>
+        </div>
+      </div>
+
       <div class="prompt-templates">
-        <h3>选择模板</h3>
+        <h3 class="subsection-title">
+          <span class="btn-icon">📋</span> 选择模板
+        </h3>
         <div class="template-list">
-          <div 
-            v-for="template in promptTemplates" 
+          <div
+            v-for="template in promptTemplates"
             :key="template.id"
-            class="template-item"
+            class="template-item tech-card-mini"
             :class="{ active: currentPrompt === template.content }"
             @click="selectPromptTemplate(template)"
           >
-            <span class="template-name">{{ template.name }}</span>
+            <div class="template-info">
+              <span class="template-name">{{ template.name }}</span>
+              <span v-if="currentPrompt === template.content" class="active-badge">当前使用</span>
+            </div>
             <div class="template-actions">
-              <button class="btn tiny" @click.stop="openPromptEditor(template)">编辑</button>
-              <button v-if="!['default', 'sales', 'support'].includes(template.id)" class="btn tiny danger" @click.stop="deletePromptTemplate(template.id)">删除</button>
+              <button class="btn small" @click.stop="openPromptEditor(template)">编辑</button>
+              <button v-if="!['default', 'sales', 'support'].includes(template.id)" class="btn small danger" @click.stop="deletePromptTemplate(template.id)">删除</button>
             </div>
           </div>
         </div>
       </div>
 
-      <div class="prompt-edit-form">
-        <h3>{{ editingPromptId ? '编辑提示词' : '新建提示词' }}</h3>
+      <div class="tech-card-mini" style="margin-bottom: 16px;">
+        <h3 class="subsection-title">
+          <span class="btn-icon">✏️</span> {{ editingPromptId ? '编辑提示词' : '新建提示词' }}
+        </h3>
         <div class="row">
           <label>提示词名称</label>
-          <input v-model="editingPromptName" type="text" placeholder="例如：销售分析模板" />
+          <input v-model="editingPromptName" type="text" placeholder="例如：销售分析模板" class="tech-input" />
         </div>
         <div class="row">
           <label>提示词内容</label>
-          <textarea v-model="editingPromptContent" rows="8" placeholder="请输入 AI 分析提示词..." />
+          <textarea v-model="editingPromptContent" rows="6" placeholder="请输入 AI 分析提示词..." class="tech-textarea" />
         </div>
         <div class="actions">
-          <button class="btn primary" @click="savePromptTemplate">保存模板</button>
-          <button class="btn" @click="applyCurrentPrompt">直接应用</button>
-          <button class="btn" @click="showPromptEditor = false">取消</button>
+          <button class="btn primary" @click="savePromptTemplate">
+            <span class="btn-icon">💾</span> 保存模板
+          </button>
+          <button class="btn" @click="applyCurrentPrompt">
+            <span class="btn-icon">✓</span> 直接应用
+          </button>
+          <button class="btn" @click="showPromptEditor = false">
+            <span class="btn-icon">✕</span> 取消
+          </button>
         </div>
       </div>
 
-      <div class="current-prompt-preview">
-        <h3>当前使用的提示词</h3>
+      <div class="tech-card-mini">
+        <h3 class="subsection-title">
+          <span class="btn-icon">👁️</span> 当前使用的提示词
+        </h3>
         <pre class="prompt-preview">{{ currentPrompt }}</pre>
       </div>
     </section>
 
-    <section class="add-form" v-if="monitorStatus !== 'monitoring'">
-      <h2 class="sec-title">添加邮箱</h2>
-      <div class="row">
-        <label>显示名称（选填）</label>
-        <input v-model="accountName" type="text" placeholder="例如：wyxd的腾讯企业邮" :disabled="addStatus === 'connecting'" />
+    <section class="add-form tech-card" v-if="monitorStatus !== 'monitoring'">
+      <div class="card-header">
+        <div class="card-title">
+          <span class="title-icon">➕</span>
+          <h2>添加邮箱账户</h2>
+        </div>
       </div>
-      <div class="row">
-        <label>邮箱</label>
-        <input v-model="email" type="email" placeholder="your@company.com" :disabled="addStatus === 'connecting'" />
-      </div>
-      <div class="row">
-        <label>客户端密码</label>
-        <input v-model="password" type="password" placeholder="应用专用密码 / 授权码" :disabled="addStatus === 'connecting'" />
-      </div>
-      <div class="row">
-        <label>IMAP 服务器（选填）</label>
-        <input v-model="imapHost" type="text" placeholder="企业邮箱请填实际地址" :disabled="addStatus === 'connecting'" />
-      </div>
-      <div class="row">
-        <label>IMAP 端口（选填）</label>
-        <input v-model.number="imapPort" type="number" placeholder="993" min="1" max="65535" :disabled="addStatus === 'connecting'" />
+      <div class="form-grid">
+        <div class="row">
+          <label>
+            <span class="label-icon">🏷️</span> 显示名称
+            <span class="optional">选填</span>
+          </label>
+          <input v-model="accountName" type="text" placeholder="例如：wyxd的腾讯企业邮" :disabled="addStatus === 'connecting'" class="tech-input" />
+        </div>
+        <div class="row">
+          <label>
+            <span class="label-icon">📧</span> 邮箱地址
+          </label>
+          <input v-model="email" type="email" placeholder="your@company.com" :disabled="addStatus === 'connecting'" class="tech-input" />
+        </div>
+        <div class="row">
+          <label>
+            <span class="label-icon">🔐</span> 客户端密码
+          </label>
+          <input v-model="password" type="password" placeholder="应用专用密码 / 授权码" :disabled="addStatus === 'connecting'" class="tech-input" />
+        </div>
+        <div class="row">
+          <label>
+            <span class="label-icon">🌐</span> IMAP 服务器
+            <span class="optional">选填</span>
+          </label>
+          <input v-model="imapHost" type="text" placeholder="企业邮箱请填实际地址" :disabled="addStatus === 'connecting'" class="tech-input" />
+        </div>
+        <div class="row">
+          <label>
+            <span class="label-icon">🔢</span> IMAP 端口
+            <span class="optional">选填</span>
+          </label>
+          <input v-model.number="imapPort" type="number" placeholder="993" min="1" max="65535" :disabled="addStatus === 'connecting'" class="tech-input" />
+        </div>
       </div>
       <div class="actions">
-        <button class="btn primary" @click="addAccount" :disabled="!email.trim() || !password || addStatus === 'connecting'">添加并连接</button>
+        <button class="btn primary" @click="addAccount" :disabled="!email.trim() || !password || addStatus === 'connecting'">
+          <span class="btn-icon">🔗</span>
+          {{ addStatus === 'connecting' ? '连接中...' : '添加并连接' }}
+        </button>
       </div>
       <p v-if="addStatus === 'error'" class="err-msg">{{ addStatusText }}</p>
     </section>
 
-    <section class="accounts" v-if="accounts.length">
-      <h2 class="sec-title">已添加的邮箱</h2>
+    <section class="accounts tech-card" v-if="accounts.length">
+      <div class="card-header">
+        <div class="card-title">
+          <span class="title-icon">📬</span>
+          <h2>已添加的邮箱</h2>
+        </div>
+        <span class="count-badge">{{ accounts.length }} 个账户</span>
+      </div>
       <ul class="account-list">
-        <li v-for="a in accounts" :key="a.accountId" class="account-item">
-          <span class="account-name">{{ a.name }}</span>
-          <span class="account-email">{{ a.email }}</span>
-          <button class="btn small" @click="removeAccount(a.accountId)">移除</button>
+        <li v-for="a in accounts" :key="a.accountId" class="account-item tech-card-mini">
+          <div class="account-info">
+            <div class="account-avatar">
+              {{ a.name.charAt(0).toUpperCase() }}
+            </div>
+            <div class="account-details">
+              <span class="account-name">{{ a.name }}</span>
+              <span class="account-email">{{ a.email }}</span>
+            </div>
+          </div>
+          <button class="btn small danger" @click="removeAccount(a.accountId)" title="移除账户">
+            ✕
+          </button>
         </li>
       </ul>
       <div class="monitor-actions">
-        <button v-if="monitorStatus === 'idle'" class="btn primary" @click="startMonitor">开始监控全部</button>
-        <button v-else class="btn" @click="stopMonitor">暂停监控</button>
-        <button class="btn" @click="disconnectAll">全部断开</button>
+        <button v-if="monitorStatus === 'idle'" class="btn success" @click="startMonitor">
+          <span class="btn-icon">▶</span> 开始监控
+        </button>
+        <button v-else class="btn warning" @click="stopMonitor">
+          <span class="btn-icon">⏸</span> 暂停监控
+        </button>
+        <button class="btn" @click="disconnectAll">
+          <span class="btn-icon">⏹</span> 全部断开
+        </button>
         <button
           class="btn"
-          :class="{ primary: autoAnalyzeEnabled }"
+          :class="{ 'ai-active': autoAnalyzeEnabled }"
           @click="toggleAutoAnalyze"
           :title="autoAnalyzeEnabled ? '关闭后新邮件与选中邮件将不再自动调用 AI 分析' : '开启后将对选中邮件及新邮件自动进行 AI 分析并评分'"
         >
-          {{ autoAnalyzeEnabled ? '自动分析：已开启' : '自动分析：关闭' }}
+          <span class="btn-icon">🤖</span>
+          {{ autoAnalyzeEnabled ? 'AI 分析：开启' : 'AI 分析：关闭' }}
         </button>
       </div>
       <p v-if="addStatusText && addStatus !== 'error'" class="status-msg">{{ addStatusText }}</p>
     </section>
 
-    <section v-if="!api" class="status error-hint">
-      <span class="dot error" />
-      <span class="error-block">
-        当前不在桌面应用环境中。请用 <code>npm run dev</code> 启动后，在自动弹出的 Electron 窗口中操作。
-      </span>
+    <section v-if="!api" class="error-hint tech-card error">
+      <div class="error-icon">⚠️</div>
+      <div class="error-content">
+        <span class="error-title">环境错误</span>
+        <span class="error-block">
+          当前不在桌面应用环境中。请用 <code>npm run dev</code> 启动后，在自动弹出的 Electron 窗口中操作。
+        </span>
+      </div>
     </section>
 
     <section class="mail-area" v-if="monitorStatus === 'monitoring' || mails.length">
       <div class="mail-list">
-        <h2>收件列表（{{ mails.length }} 封）</h2>
+        <h2>
+          <span class="btn-icon">📨</span>
+          收件列表
+          <span class="count-badge" style="margin-left: 8px;">{{ mails.length }}</span>
+        </h2>
         <ul>
           <li
             v-for="m in mails"
@@ -682,14 +871,25 @@ function openWebsite() {
         <h3>{{ selectedMail.subject }}</h3>
         <div class="meta">
           <span class="detail-tag">{{ selectedMail.accountName }}</span>
-          发件人：{{ selectedMail.from }} · {{ selectedMail.date }}
+          <span style="color: var(--text-secondary);">发件人：{{ selectedMail.from }} · {{ selectedMail.date }}</span>
         </div>
         <div v-if="autoAnalyzeEnabled && (aiResultMap[mailKey(selectedMail)]?.summary || aiResultMap[mailKey(selectedMail)]?.loading)" class="ai-section">
-          <h4>AI 分析</h4>
-          <div v-if="aiResultMap[mailKey(selectedMail)].loading && !aiResultMap[mailKey(selectedMail)].summary" class="ai-loading">正在分析…</div>
+          <div class="ai-header">
+            <span class="ai-icon">🤖</span>
+            <h4>AI 智能分析</h4>
+            <div v-if="aiResultMap[mailKey(selectedMail)].loading" class="ai-loading-dots">
+              <span></span><span></span><span></span>
+            </div>
+          </div>
+          <div v-if="aiResultMap[mailKey(selectedMail)].loading && !aiResultMap[mailKey(selectedMail)].summary" class="ai-loading-text" style="color: var(--text-secondary);">
+            正在分析邮件内容...
+          </div>
           <div v-else class="ai-content">
             <pre class="ai-text">{{ aiResultMap[mailKey(selectedMail)].summary }}</pre>
-            <p v-if="aiResultMap[mailKey(selectedMail)].score" class="ai-score">评分：{{ aiResultMap[mailKey(selectedMail)].score }}</p>
+            <p v-if="aiResultMap[mailKey(selectedMail)].score" class="ai-score">
+              <span class="score-label">综合评分</span>
+              <span class="score-value">{{ aiResultMap[mailKey(selectedMail)].score }}</span>
+            </p>
           </div>
         </div>
         <pre class="body">{{ selectedMail.text || '(无正文)' }}</pre>
@@ -699,405 +899,838 @@ function openWebsite() {
 </template>
 
 <style scoped>
+/* ===== 基础布局 ===== */
 .app {
-  max-width: 900px;
+  max-width: 1200px;
   margin: 0 auto;
   padding: 24px;
-  font-family: 'Segoe UI', system-ui, sans-serif;
+  position: relative;
+  z-index: 1;
 }
+
+/* ===== 科技背景效果 - 纯色版 ===== */
+.tech-bg {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: -1;
+  overflow: hidden;
+  background: var(--tech-bg-primary);
+}
+
+.grid-overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background-image:
+    repeating-linear-gradient(0deg, rgba(0, 212, 212, 0.05) 0px, rgba(0, 212, 212, 0.05) 1px, transparent 1px, transparent 60px),
+    repeating-linear-gradient(90deg, rgba(0, 212, 212, 0.05) 0px, rgba(0, 212, 212, 0.05) 1px, transparent 1px, transparent 60px);
+}
+
+.glow-orb {
+  position: absolute;
+  border-radius: 50%;
+  filter: blur(100px);
+  opacity: 0.1;
+}
+
+.orb-1 {
+  width: 400px;
+  height: 400px;
+  background: var(--tech-cyan);
+  top: -150px;
+  right: -100px;
+}
+
+.orb-2 {
+  width: 300px;
+  height: 300px;
+  background: var(--tech-purple);
+  bottom: -100px;
+  left: -50px;
+}
+
+/* ===== 头部样式 ===== */
 .header {
   margin-bottom: 24px;
+  padding: 24px;
+  background: var(--tech-bg-card);
+  border: 1px solid var(--border-secondary);
+  border-radius: 12px;
+  box-shadow: var(--shadow-md);
 }
-.header h1 {
-  font-size: 1.5rem;
-  font-weight: 600;
-  color: #1a1a2e;
-  margin: 0 0 8px 0;
+
+.header-title {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin-bottom: 16px;
 }
-.hint {
-  color: #64748b;
-  font-size: 0.9rem;
+
+.logo-icon {
+  width: 44px;
+  height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--tech-cyan);
+  border-radius: 10px;
+  color: var(--tech-bg-primary);
+  flex-shrink: 0;
+}
+
+.logo-icon svg {
+  width: 24px;
+  height: 24px;
+}
+
+.title-text h1 {
+  font-size: 1.6rem;
+  font-weight: 700;
   margin: 0;
+  color: var(--text-primary);
+  letter-spacing: -0.5px;
 }
+
+.hint {
+  color: var(--text-secondary);
+  font-size: 0.9rem;
+  margin: 4px 0 0 0;
+}
+
+.status-indicator {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 14px;
+  background: var(--tech-bg-secondary);
+  border: 1px solid var(--border-secondary);
+  border-radius: 20px;
+}
+
+.status-indicator.active {
+  border-color: var(--tech-green);
+  background: rgba(16, 185, 129, 0.1);
+}
+
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--text-muted);
+}
+
+.status-indicator.active .status-dot {
+  background: var(--tech-green);
+  box-shadow: 0 0 8px var(--tech-green);
+}
+
+.status-text {
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+  font-weight: 500;
+}
+
 .header-actions {
   display: flex;
-  gap: 12px;
-  margin-top: 12px;
+  gap: 10px;
   flex-wrap: wrap;
   align-items: center;
 }
-.open-at-login {
+
+/* ===== 按钮样式 ===== */
+.btn {
   display: inline-flex;
   align-items: center;
   gap: 6px;
+  padding: 10px 16px;
+  border-radius: 8px;
+  border: 1px solid var(--border-secondary);
+  background: var(--tech-bg-secondary);
+  color: var(--text-primary);
+  cursor: pointer;
   font-size: 0.9rem;
-  color: #475569;
+  font-weight: 500;
+  transition: all 0.2s ease;
+}
+
+.btn:hover:not(:disabled) {
+  border-color: var(--border-primary);
+  background: var(--tech-bg-input);
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.btn-icon {
+  font-size: 1rem;
+}
+
+.btn.primary {
+  background: var(--tech-cyan);
+  border-color: var(--tech-cyan);
+  color: var(--tech-bg-primary);
+  font-weight: 600;
+}
+
+.btn.primary:hover:not(:disabled) {
+  background: var(--tech-cyan-bright);
+  box-shadow: var(--shadow-glow);
+}
+
+.btn.success {
+  background: rgba(16, 185, 129, 0.2);
+  border-color: var(--tech-green);
+  color: var(--tech-green);
+}
+
+.btn.warning {
+  background: rgba(245, 158, 11, 0.2);
+  border-color: var(--tech-orange);
+  color: var(--tech-orange);
+}
+
+.btn.danger {
+  background: rgba(239, 68, 68, 0.1);
+  border-color: var(--tech-red);
+  color: var(--tech-red);
+}
+
+.btn.ai-active {
+  background: var(--tech-cyan-dim);
+  border-color: var(--tech-cyan);
+  color: var(--tech-cyan);
+}
+
+.btn.small {
+  padding: 6px 12px;
+  font-size: 0.85rem;
+}
+
+/* ===== 开关样式 ===== */
+.tech-toggle {
+  display: flex;
+  align-items: center;
+  gap: 10px;
   cursor: pointer;
 }
-.open-at-login input {
-  width: auto;
-  max-width: none;
+
+.tech-toggle input {
+  display: none;
 }
 
-/* 历史记录面板 */
-.history-panel {
-  background: #f8fafc;
-  border: 1px solid #e2e8f0;
+.toggle-slider {
+  width: 44px;
+  height: 24px;
+  background: var(--tech-bg-input);
+  border: 1px solid var(--border-secondary);
   border-radius: 12px;
-  padding: 16px;
-  margin-bottom: 20px;
+  position: relative;
+  transition: all 0.3s ease;
 }
 
-/* 提示词编辑器 */
-.prompt-editor {
-  background: #f8fafc;
-  border: 1px solid #e2e8f0;
-  border-radius: 12px;
-  padding: 16px;
-  margin-bottom: 20px;
+.toggle-slider::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 18px;
+  height: 18px;
+  background: var(--text-muted);
+  border-radius: 50%;
+  transition: all 0.3s ease;
 }
-.prompt-editor h3 {
+
+.tech-toggle input:checked + .toggle-slider {
+  background: var(--tech-cyan-dim);
+  border-color: var(--tech-cyan);
+}
+
+.tech-toggle input:checked + .toggle-slider::after {
+  left: 22px;
+  background: var(--tech-cyan);
+}
+
+.toggle-label {
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+}
+
+/* ===== 卡片样式 ===== */
+.tech-card {
+  background: var(--tech-bg-card);
+  border: 1px solid var(--border-secondary);
+  border-radius: 12px;
+  padding: 20px;
+  margin-bottom: 20px;
+  box-shadow: var(--shadow-md);
+}
+
+.tech-card-mini {
+  background: var(--tech-bg-secondary);
+  border: 1px solid var(--border-secondary);
+  border-radius: 8px;
+  padding: 12px;
+  transition: all 0.2s ease;
+}
+
+.tech-card-mini:hover {
+  border-color: var(--border-primary);
+}
+
+.card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 16px;
+}
+
+.card-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.card-title h2 {
+  font-size: 1.1rem;
+  font-weight: 600;
+  margin: 0;
+  color: var(--text-primary);
+}
+
+.title-icon {
+  font-size: 1.2rem;
+}
+
+.count-badge {
+  padding: 4px 10px;
+  background: var(--tech-bg-input);
+  border: 1px solid var(--border-secondary);
+  border-radius: 12px;
+  font-size: 0.8rem;
+  color: var(--tech-cyan);
+}
+
+/* ===== 表单样式 ===== */
+.form-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 16px;
+}
+
+.row {
+  margin-bottom: 12px;
+}
+
+.row label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+  margin-bottom: 6px;
+}
+
+.label-icon {
+  font-size: 0.9rem;
+}
+
+.optional {
+  margin-left: auto;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  background: var(--tech-bg-input);
+  padding: 2px 8px;
+  border-radius: 4px;
+}
+
+.tech-input {
+  width: 100%;
+  padding: 12px 14px;
+  background: var(--tech-bg-input);
+  border: 1px solid var(--border-secondary);
+  border-radius: 8px;
+  color: var(--text-primary);
   font-size: 0.95rem;
-  margin: 16px 0 12px 0;
-  color: #1e293b;
+  transition: all 0.2s ease;
 }
-.prompt-editor h3:first-child {
-  margin-top: 0;
+
+.tech-input::placeholder {
+  color: var(--text-muted);
 }
+
+.tech-input:focus {
+  outline: none;
+  border-color: var(--border-focus);
+  box-shadow: 0 0 0 3px rgba(0, 212, 212, 0.1);
+}
+
+.tech-input:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 16px;
+  flex-wrap: wrap;
+}
+
+.err-msg {
+  margin-top: 12px;
+  padding: 10px 14px;
+  background: rgba(239, 68, 68, 0.1);
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  border-radius: 8px;
+  color: var(--tech-red);
+  font-size: 0.9rem;
+}
+
+.status-msg {
+  margin-top: 12px;
+  color: var(--text-secondary);
+  font-size: 0.9rem;
+}
+
+/* ===== 历史记录面板 ===== */
+.history-panel .hint {
+  color: var(--text-secondary);
+  font-size: 0.9rem;
+  margin-bottom: 16px;
+}
+
+/* ===== 提示词编辑器 ===== */
+.subsection-title {
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin: 0 0 12px 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .template-list {
   display: flex;
   flex-direction: column;
   gap: 8px;
   margin-bottom: 16px;
 }
+
 .template-item {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 10px 12px;
-  background: #fff;
-  border: 1px solid #e2e8f0;
-  border-radius: 8px;
   cursor: pointer;
-  transition: all 0.2s;
 }
-.template-item:hover {
-  border-color: #3b82f6;
-}
+
 .template-item.active {
-  border-color: #3b82f6;
-  background: #eff6ff;
+  border-color: var(--tech-cyan);
+  background: var(--tech-cyan-dim);
 }
+
+.template-info {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
 .template-name {
   font-weight: 500;
-  color: #1e293b;
+  color: var(--text-primary);
 }
+
+.active-badge {
+  padding: 2px 8px;
+  background: var(--tech-cyan-dim);
+  border: 1px solid var(--tech-cyan);
+  border-radius: 4px;
+  font-size: 0.75rem;
+  color: var(--tech-cyan);
+}
+
 .template-actions {
   display: flex;
   gap: 6px;
 }
-.prompt-edit-form {
-  background: #fff;
-  border: 1px solid #e2e8f0;
-  border-radius: 8px;
-  padding: 16px;
-  margin-bottom: 16px;
-}
-.prompt-edit-form textarea {
+
+.tech-textarea {
   width: 100%;
   min-height: 120px;
-  padding: 10px 12px;
-  border: 1px solid #e2e8f0;
+  padding: 12px 14px;
+  background: var(--tech-bg-input);
+  border: 1px solid var(--border-secondary);
   border-radius: 8px;
+  color: var(--text-primary);
   font-size: 0.9rem;
-  font-family: monospace;
+  font-family: 'Fira Code', monospace;
   resize: vertical;
+  line-height: 1.6;
 }
-.prompt-edit-form textarea:focus {
+
+.tech-textarea:focus {
   outline: none;
-  border-color: #3b82f6;
-  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.15);
+  border-color: var(--border-focus);
 }
-.current-prompt-preview {
-  background: #fff;
-  border: 1px solid #e2e8f0;
-  border-radius: 8px;
-  padding: 16px;
-}
+
 .prompt-preview {
   white-space: pre-wrap;
   word-break: break-word;
   font-size: 0.85rem;
-  line-height: 1.5;
+  line-height: 1.6;
   margin: 0;
-  color: #334155;
-  background: #f1f5f9;
+  color: var(--text-secondary);
+  background: var(--tech-bg-input);
   padding: 12px;
-  border-radius: 6px;
+  border-radius: 8px;
+  border: 1px solid var(--border-secondary);
   max-height: 200px;
   overflow-y: auto;
+  font-family: 'Fira Code', monospace;
 }
 
-.sec-title {
-  font-size: 1rem;
-  margin: 0 0 12px 0;
-  color: #1e293b;
-}
-.row {
-  margin-bottom: 12px;
-}
-.row label {
-  display: block;
-  font-size: 0.85rem;
-  color: #475569;
-  margin-bottom: 4px;
-}
-.row input {
-  width: 100%;
-  max-width: 360px;
-  padding: 10px 12px;
-  border: 1px solid #e2e8f0;
-  border-radius: 8px;
-  font-size: 1rem;
-}
-.row input:focus {
-  outline: none;
-  border-color: #3b82f6;
-  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.15);
-}
-.actions,
-.monitor-actions {
-  display: flex;
-  gap: 10px;
-  margin-top: 16px;
-  flex-wrap: wrap;
-}
-.btn {
-  padding: 10px 18px;
-  border-radius: 8px;
-  border: 1px solid #e2e8f0;
-  background: #fff;
-  cursor: pointer;
-  font-size: 0.95rem;
-}
-.btn:disabled {
-  opacity: 0.6;
-  cursor: not-allowed;
-}
-.btn.primary {
-  background: #3b82f6;
-  color: #fff;
-  border-color: #3b82f6;
-}
-.btn.small {
-  padding: 6px 12px;
-  font-size: 0.85rem;
-}
-.btn.tiny {
-  padding: 4px 8px;
-  font-size: 0.75rem;
-}
-.btn.danger {
-  color: #dc2626;
-  border-color: #dc2626;
-}
-.btn.danger:hover {
-  background: #fef2f2;
-}
-.err-msg,
-.status-msg {
-  margin-top: 12px;
-  color: #dc2626;
-  font-size: 0.9rem;
-}
-.status-msg {
-  color: #475569;
-}
+/* ===== 账户列表 ===== */
 .account-list {
   list-style: none;
   padding: 0;
   margin: 0 0 16px 0;
 }
+
 .account-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 10px;
+}
+
+.account-info {
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 10px 12px;
-  background: #f8fafc;
-  border-radius: 8px;
-  margin-bottom: 8px;
 }
-.account-name {
-  font-weight: 500;
-  color: #1e293b;
-  min-width: 140px;
-}
-.account-email {
-  font-size: 0.9rem;
-  color: #64748b;
-  flex: 1;
-}
-.status.error-hint {
+
+.account-avatar {
+  width: 40px;
+  height: 40px;
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 12px 16px;
-  background: #fef2f2;
+  justify-content: center;
+  background: var(--tech-cyan);
   border-radius: 8px;
-  margin-bottom: 20px;
-  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--tech-bg-primary);
+  font-size: 1rem;
 }
-.dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
+
+.account-details {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.account-name {
+  font-weight: 600;
+  color: var(--text-primary);
+  font-size: 0.95rem;
+}
+
+.account-email {
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+}
+
+.monitor-actions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+/* ===== 错误提示 ===== */
+.error-hint {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 16px 20px;
+}
+
+.error-hint.error {
+  background: rgba(239, 68, 68, 0.1);
+  border-color: rgba(239, 68, 68, 0.3);
+}
+
+.error-icon {
+  font-size: 1.4rem;
   flex-shrink: 0;
 }
-.dot.error {
-  background: #ef4444;
+
+.error-content {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
 }
+
+.error-title {
+  font-weight: 600;
+  color: var(--tech-red);
+}
+
+.error-block {
+  font-size: 0.9rem;
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
 .error-block code {
-  background: #e2e8f0;
-  padding: 2px 6px;
+  background: var(--tech-bg-input);
+  padding: 2px 8px;
   border-radius: 4px;
-  font-size: 0.9em;
+  color: var(--tech-cyan);
+  font-family: 'Fira Code', monospace;
 }
+
+/* ===== 邮件区域 ===== */
 .mail-area {
   display: grid;
-  grid-template-columns: 340px 1fr;
-  gap: 20px;
-  min-height: 360px;
-  border: 1px solid #e2e8f0;
+  grid-template-columns: 360px 1fr;
+  gap: 0;
+  min-height: 480px;
+  background: var(--tech-bg-card);
+  border: 1px solid var(--border-secondary);
   border-radius: 12px;
   overflow: hidden;
 }
-.mail-list,
-.mail-detail {
-  padding: 16px;
-  overflow: auto;
-}
+
 .mail-list {
-  background: #f8fafc;
-  border-right: 1px solid #e2e8f0;
+  background: var(--tech-bg-secondary);
+  border-right: 1px solid var(--border-secondary);
+  padding: 16px;
+  overflow-y: auto;
 }
-.mail-list h2,
-.mail-detail h3 {
+
+.mail-list h2 {
   font-size: 1rem;
+  font-weight: 600;
   margin: 0 0 12px 0;
-  color: #1e293b;
+  color: var(--text-primary);
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
+
 .mail-list ul {
   list-style: none;
   padding: 0;
   margin: 0;
 }
+
 .mail-list li {
   padding: 12px;
   border-radius: 8px;
   cursor: pointer;
-  margin-bottom: 4px;
+  margin-bottom: 6px;
   border: 1px solid transparent;
+  background: var(--tech-bg-input);
+  transition: all 0.2s ease;
 }
+
 .mail-list li:hover {
-  background: #f1f5f9;
+  border-color: var(--border-primary);
+  background: rgba(0, 212, 212, 0.05);
 }
+
 .mail-list li.active {
-  background: #e0f2fe;
-  border-color: #7dd3fc;
+  background: var(--tech-cyan-dim);
+  border-color: var(--tech-cyan);
 }
+
 .mail-list .tag {
   display: inline-block;
   font-size: 0.7rem;
-  padding: 2px 6px;
+  padding: 3px 8px;
   border-radius: 4px;
-  background: #e0e7ff;
-  color: #3730a3;
-  margin-bottom: 4px;
-  max-width: 100%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  background: var(--tech-purple);
+  color: var(--text-primary);
+  margin-right: 6px;
 }
-.mail-list .from {
-  display: block;
-  font-size: 0.85rem;
-  color: #64748b;
-  margin-bottom: 4px;
-}
-.mail-list .subject {
-  font-weight: 500;
-  color: #1e293b;
-  display: block;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.mail-list .date {
-  font-size: 0.75rem;
-  color: #94a3b8;
-  display: block;
-  margin-top: 4px;
-}
-.mail-detail .meta {
-  font-size: 0.85rem;
-  color: #64748b;
-  margin-bottom: 12px;
-}
-.mail-detail .detail-tag {
+
+.score-badge {
   display: inline-block;
-  margin-right: 8px;
   font-size: 0.75rem;
   padding: 2px 8px;
   border-radius: 4px;
-  background: #e0e7ff;
-  color: #3730a3;
+  background: var(--tech-cyan);
+  color: var(--tech-bg-primary);
+  font-weight: 700;
 }
+
+.mail-list .from {
+  display: block;
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+  margin-top: 6px;
+}
+
+.mail-list .subject {
+  font-weight: 500;
+  color: var(--text-primary);
+  display: block;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-top: 4px;
+}
+
+.mail-list .date {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  display: block;
+  margin-top: 4px;
+}
+
+.mail-detail {
+  padding: 20px;
+  overflow-y: auto;
+}
+
+.mail-detail h3 {
+  font-size: 1.2rem;
+  font-weight: 600;
+  margin: 0 0 12px 0;
+  color: var(--text-primary);
+  line-height: 1.4;
+}
+
+.mail-detail .meta {
+  font-size: 0.9rem;
+  color: var(--text-secondary);
+  margin-bottom: 16px;
+}
+
+.detail-tag {
+  display: inline-block;
+  padding: 4px 10px;
+  border-radius: 6px;
+  background: var(--tech-purple);
+  color: var(--text-primary);
+  font-size: 0.8rem;
+  font-weight: 500;
+  margin-right: 8px;
+}
+
+/* ===== AI 分析区域 ===== */
+.ai-section {
+  position: relative;
+  background: var(--tech-bg-secondary);
+  border: 1px solid var(--border-secondary);
+  border-top: 2px solid var(--tech-cyan);
+  border-radius: 8px;
+  padding: 16px;
+  margin-bottom: 16px;
+}
+
+.ai-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.ai-icon {
+  font-size: 1.2rem;
+}
+
+.ai-section h4 {
+  margin: 0;
+  font-size: 0.95rem;
+  color: var(--tech-cyan);
+  font-weight: 600;
+}
+
+.ai-loading-dots {
+  display: flex;
+  gap: 4px;
+  margin-left: auto;
+}
+
+.ai-loading-dots span {
+  width: 6px;
+  height: 6px;
+  background: var(--tech-cyan);
+  border-radius: 50%;
+  animation: bounce 1.4s ease-in-out infinite both;
+}
+
+.ai-loading-dots span:nth-child(1) { animation-delay: -0.32s; }
+.ai-loading-dots span:nth-child(2) { animation-delay: -0.16s; }
+
+@keyframes bounce {
+  0%, 80%, 100% { transform: scale(0); }
+  40% { transform: scale(1); }
+}
+
+.ai-text {
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 0.9rem;
+  line-height: 1.7;
+  margin: 0 0 12px 0;
+  color: var(--text-secondary);
+  font-family: inherit;
+}
+
+.ai-score {
+  margin: 0;
+  padding-top: 12px;
+  border-top: 1px solid var(--border-secondary);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.ai-score .score-label {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}
+
+.ai-score .score-value {
+  font-size: 1.1rem;
+  font-weight: 700;
+  color: var(--tech-cyan);
+}
+
 .mail-detail .body {
   white-space: pre-wrap;
   word-break: break-word;
   font-size: 0.9rem;
-  line-height: 1.5;
+  line-height: 1.7;
   margin: 0;
-  color: #334155;
-}
-.score-badge {
-  display: inline-block;
-  font-size: 0.7rem;
-  padding: 2px 6px;
-  border-radius: 4px;
-  background: #dbeafe;
-  color: #1d4ed8;
-  margin-left: 6px;
-  font-weight: 600;
-}
-.ai-section {
-  margin-bottom: 16px;
-  padding: 12px;
-  background: #f0fdf4;
-  border: 1px solid #bbf7d0;
+  color: var(--text-secondary);
+  background: var(--tech-bg-input);
+  padding: 16px;
   border-radius: 8px;
+  border: 1px solid var(--border-secondary);
 }
-.ai-section h4 {
-  margin: 0 0 8px 0;
-  font-size: 0.9rem;
-  color: #166534;
-}
-.ai-loading {
-  color: #15803d;
-  font-size: 0.9rem;
-}
-.ai-content .ai-text {
-  white-space: pre-wrap;
-  word-break: break-word;
-  font-size: 0.85rem;
-  line-height: 1.5;
-  margin: 0 0 8px 0;
-  color: #334155;
-}
-.ai-score {
-  margin: 0;
-  font-weight: 600;
-  color: #166534;
-  font-size: 0.9rem;
+
+/* ===== 响应式 ===== */
+@media (max-width: 900px) {
+  .mail-area {
+    grid-template-columns: 1fr;
+    grid-template-rows: 300px 1fr;
+  }
+  .mail-list {
+    border-right: none;
+    border-bottom: 1px solid var(--border-secondary);
+  }
+  .form-grid {
+    grid-template-columns: 1fr;
+  }
 }
 </style>

@@ -14,6 +14,14 @@ let hasUnreadMails = false
 let flashTimer: ReturnType<typeof setInterval> | null = null
 const POLL_MS = 8000
 
+// 连接检测和自动重连配置
+const CONNECTION_CHECK_INTERVAL = 30000 // 30秒检测一次连接
+const MAX_RECONNECT_ATTEMPTS = 5 // 最大重连次数
+const RECONNECT_DELAY = 5000 // 重连延迟5秒
+let connectionCheckTimer: ReturnType<typeof setInterval> | null = null
+let reconnectAttempts: Record<string, number> = {} // 每个账号的重连次数记录
+let reconnectTimers: Record<string, ReturnType<typeof setTimeout>> = {}
+
 // 托盘图标路径
 function getTrayIconPath() {
   return join(__dirname, '../../email.ico')
@@ -181,6 +189,109 @@ async function disconnectAccount(accountId: string) {
     await state.client.logout()
   } catch (_) {}
   accounts.delete(accountId)
+  // 清除该账号的重连记录
+  delete reconnectAttempts[accountId]
+  if (reconnectTimers[accountId]) {
+    clearTimeout(reconnectTimers[accountId])
+    delete reconnectTimers[accountId]
+  }
+}
+
+// 检查单个账号连接状态
+async function checkConnection(accountId: string, state: AccountState): Promise<boolean> {
+  try {
+    // 尝试发送 NOOP 命令或检查连接状态
+    await state.client.mailboxOpen('INBOX')
+    return true
+  } catch (err) {
+    return false
+  }
+}
+
+// 尝试重新连接单个账号
+async function tryReconnect(accountId: string) {
+  // 如果已经在重连中，跳过
+  if (reconnectTimers[accountId]) return
+  
+  const state = accounts.get(accountId)
+  if (!state) return
+  
+  const currentAttempts = reconnectAttempts[accountId] || 0
+  if (currentAttempts >= MAX_RECONNECT_ATTEMPTS) {
+    console.log(`账号 ${state.email} 重连次数超过限制，停止自动重连`)
+    // 通知前端连接已断开
+    if (mainWindow) {
+      mainWindow.webContents.send('email:connectionLost', { accountId, email: state.email, permanent: true })
+    }
+    return
+  }
+  
+  reconnectAttempts[accountId] = currentAttempts + 1
+  
+  reconnectTimers[accountId] = setTimeout(async () => {
+    try {
+      const client = new ImapFlow({
+        host: state.host,
+        port: state.port,
+        secure: true,
+        auth: { user: state.email, pass: state.password },
+        logger: false,
+        tls: {
+          rejectUnauthorized: false,
+        },
+      })
+      
+      await client.connect()
+      await client.mailboxOpen('INBOX')
+      const mailbox = client.mailbox
+      const lastUid = mailbox && typeof mailbox.uidNext === 'number' ? Math.max(0, mailbox.uidNext - 1) : 0
+      
+      // 更新账号状态（保留原始凭据）
+      accounts.set(accountId, { 
+        client, 
+        lastUid, 
+        name: state.name, 
+        email: state.email,
+        password: state.password,
+        host: state.host,
+        port: state.port
+      })
+      
+      // 重置重连计数
+      reconnectAttempts[accountId] = 0
+      delete reconnectTimers[accountId]
+      
+      console.log(`账号 ${state.email} 重连成功`)
+      // 通知前端重连成功
+      if (mainWindow) {
+        mainWindow.webContents.send('email:reconnected', { accountId, email: state.email })
+      }
+    } catch (err) {
+      delete reconnectTimers[accountId]
+      console.error(`账号 ${state.email} 重连失败:`, err)
+      // 通知前端重连失败
+      if (mainWindow) {
+        mainWindow.webContents.send('email:reconnectFailed', { accountId, email: state.email, attempt: reconnectAttempts[accountId] })
+      }
+    }
+  }, RECONNECT_DELAY)
+}
+
+// 启动连接检测
+function startConnectionCheck() {
+  if (connectionCheckTimer) {
+    clearInterval(connectionCheckTimer)
+  }
+  
+  connectionCheckTimer = setInterval(async () => {
+    for (const [accountId, state] of accounts) {
+      const isConnected = await checkConnection(accountId, state)
+      if (!isConnected) {
+        console.log(`检测到账号 ${state.email} 连接断开，准备重连...`)
+        await tryReconnect(accountId)
+      }
+    }
+  }, CONNECTION_CHECK_INTERVAL)
 }
 
 async function stopMonitor() {
@@ -188,6 +299,15 @@ async function stopMonitor() {
     clearInterval(monitorTimer)
     monitorTimer = null
   }
+  // 停止连接检测
+  if (connectionCheckTimer) {
+    clearInterval(connectionCheckTimer)
+    connectionCheckTimer = null
+  }
+  // 清除所有重连定时器
+  Object.values(reconnectTimers).forEach(timer => clearTimeout(timer))
+  reconnectTimers = {}
+  reconnectAttempts = {}
 }
 
 async function disconnectAll() {
@@ -311,6 +431,10 @@ ipcMain.handle('email:startMonitor', async () => {
     } catch (_) {}
   }
   monitorTimer = setInterval(pollAll, POLL_MS)
+  
+  // 启动连接检测和自动重连（30秒检测一次）
+  startConnectionCheck()
+  
   return { ok: true }
 })
 
