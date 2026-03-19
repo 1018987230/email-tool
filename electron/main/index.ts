@@ -32,6 +32,9 @@ interface AccountState {
   lastUid: number
   name: string
   email: string
+  host?: string
+  port?: number
+  password?: string
 }
 const accounts = new Map<string, AccountState>()
 let monitorTimer: ReturnType<typeof setInterval> | null = null
@@ -198,7 +201,7 @@ async function disconnectAccount(accountId: string) {
 }
 
 // 检查单个账号连接状态
-async function checkConnection(accountId: string, state: AccountState): Promise<boolean> {
+async function checkConnection(_accountId: string, state: AccountState): Promise<boolean> {
   try {
     // 尝试发送 NOOP 命令或检查连接状态
     await state.client.mailboxOpen('INBOX')
@@ -230,11 +233,15 @@ async function tryReconnect(accountId: string) {
   
   reconnectTimers[accountId] = setTimeout(async () => {
     try {
+      // 使用已保存的连接信息或获取默认配置
+      const host = state.host || getImapConfig(state.email).host
+      const port = state.port || getImapConfig(state.email).port
+      
       const client = new ImapFlow({
-        host: state.host,
-        port: state.port,
+        host,
+        port,
         secure: true,
-        auth: { user: state.email, pass: state.password },
+        auth: { user: state.email, pass: state.password || '' },
         logger: false,
         tls: {
           rejectUnauthorized: false,
@@ -253,8 +260,8 @@ async function tryReconnect(accountId: string) {
         name: state.name, 
         email: state.email,
         password: state.password,
-        host: state.host,
-        port: state.port
+        host,
+        port
       })
       
       // 重置重连计数
@@ -343,7 +350,7 @@ ipcMain.handle('email:connect', async (_, { email, password, imapHost, imapPort,
     await client.mailboxOpen('INBOX')
     const mailbox = client.mailbox
     const lastUid = mailbox && typeof mailbox.uidNext === 'number' ? Math.max(0, mailbox.uidNext - 1) : 0
-    accounts.set(accountId, { client, lastUid, name, email })
+    accounts.set(accountId, { client, lastUid, name, email, host, port, password })
     return { ok: true, accountId, host, accountName: name }
   } catch (err: unknown) {
     let message = err instanceof Error ? err.message : String(err)
